@@ -1,18 +1,16 @@
-ASCII → Height Grid → Pseudo-3D Raycast
+Lidar Maze Explorer
 
-This extension turns a typed ASCII string into an m×n 2D height array, then
-draws a first-person raycast of that map on the Animator canvas. Each character
-becomes a cell height: '.' and spaces are empty, '#' / '@' / '*' are tall walls,
-digits 1–9 set explicit heights, and other marks are medium walls. Rows are
-padded so the grid is rectangular; the UI shows the live m×n dimensions.
+This extension turns an ASCII maze into an explorable first-person lidar game.
+Mazes are built from three characters: '.' for open floor, and '|' / '_' for
+walls. The typed string is parsed into an m×n occupancy grid (padded to a
+rectangle). With Lidar maze mode on, you walk the maze with WASD or arrow keys
+and look with A/D or the Look slider.
 
-With ASCII raycast mode on, the shape slider orbits the camera. Each screen
-column casts a ray through the grid; hits become ColorLine vertical strips whose
-length and shade depend on distance and wall height, so closer walls look taller
-and brighter. A small top-down inset of occupied cells is drawn in the corner so
-you can see the 2D array while the 3D view updates. The map is stored in
-localStorage and edited in a dedicated textarea under the code panel.
-
-The earlier Colored Geometry Toolkit remains: ColorLine, Circle, and ColorCircle
-still work in normal draw mode. ASCII raycast is a separate mode so Gradescope's
-Line/Path drawing tests keep using the interpreter unchanged.
+The world stays dark — you cannot see walls by default. Press Space or Scan to
+fire a lidar ping: dense rays march with a fine continuous step so hit distance
+varies smoothly as you move, and vertical strip lengths scale as wall_scale /
+distance rather than jumping between discrete cell sizes. Returns accumulate as
+faded cyan stubs so you gradually recognize the layout, like a lidar mapping
+game. A brief pulse flash shows live depth strips; afterward only remembered
+points remain. Colored geometry (ColorLine / Circle) still works in normal draw
+mode.

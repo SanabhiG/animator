@@ -1,6 +1,6 @@
 //// Animator -- an application for program-generated drawings.
 
-import ascii_ray
+import ascii_ray.{type Maze, type Player, type ScanPoint, Player}
 import builtins
 import data.{Library}
 import drawing
@@ -48,6 +48,10 @@ pub type Model {
     current: String,
     ascii_mode: Bool,
     ascii_text: String,
+    maze: Maze,
+    player: Player,
+    scan_points: List(ScanPoint),
+    pulse: Bool,
   )
 }
 
@@ -62,7 +66,13 @@ pub type Msg {
   PlayAnim
   ToggleAscii
   SetAscii(String)
+  Key(String)
+  Scan
+  ClearPulse
 }
+
+@external(javascript, "./app_keys_ffi.mjs", "attachKeys")
+fn attach_keys(on_key: fn(String) -> Nil) -> Nil
 
 // ── Init ───────────────────────────────────────────────────────────────────────
 
@@ -73,6 +83,8 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
     Ok(text) if text != "" -> text
     _ -> ascii_ray.default_ascii
   }
+  let maze = ascii_ray.parse_maze(ascii_text)
+  let player = ascii_ray.spawn_player(maze)
   let model =
     Model(
       source:,
@@ -84,6 +96,10 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       current: lib.current,
       ascii_mode: False,
       ascii_text:,
+      maze:,
+      player:,
+      scan_points: [],
+      pulse: False,
     )
   #(
     model,
@@ -91,6 +107,7 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       editor.mount(source, SetCode),
       effect.from(fn(dispatch) { dispatch(SetCode(source)) }),
       effect.from(fn(_) { render.set_speed(1.0) }),
+      effect.from(fn(dispatch) { attach_keys(fn(k) { dispatch(Key(k)) }) }),
     ]),
   )
 }
@@ -129,13 +146,20 @@ fn clear_drawing() -> Effect(Msg) {
   })
 }
 
+fn maze_frame(model: Model, reset: Bool) -> #(Model, Effect(Msg)) {
+  let paths =
+    ascii_ray.render_frame(
+      model.maze,
+      model.player,
+      model.scan_points,
+      model.pulse,
+    )
+  #(Model(..model, error: ""), animate(paths, reset))
+}
+
 fn refresh(model: Model, reset: Bool) -> #(Model, Effect(Msg)) {
   case model.ascii_mode {
-    True -> {
-      let paths =
-        ascii_ray.render_ascii(model.ascii_text, model.shape_slider)
-      #(Model(..model, error: ""), animate(paths, reset))
-    }
+    True -> maze_frame(model, reset)
     False ->
       case run_source(model.shape_slider, model.source) {
         Ok(paths) -> #(Model(..model, error: ""), animate(paths, reset))
@@ -151,6 +175,26 @@ fn apply_source(model: Model, text: String, reset: Bool) -> #(Model, Effect(Msg)
   refresh(next, reset)
 }
 
+fn do_scan(model: Model) -> #(Model, Effect(Msg)) {
+  let points = ascii_ray.scan(model.maze, model.player, model.scan_points)
+  let next = Model(..model, scan_points: points, pulse: True)
+  let #(m, fx) = maze_frame(next, True)
+  #(
+    m,
+    effect.batch([
+      fx,
+      effect.from(fn(dispatch) {
+        // Brief flash of live depth strips, then fall back to remembered points.
+        let _ = set_timeout(fn() { dispatch(ClearPulse) }, 220)
+        Nil
+      }),
+    ]),
+  )
+}
+
+@external(javascript, "./app_keys_ffi.mjs", "setTimeout")
+fn set_timeout(cb: fn() -> Nil, ms: Int) -> Int
+
 // ── Update ─────────────────────────────────────────────────────────────────────
 
 pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
@@ -159,7 +203,17 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
 
     SetCode(text) -> apply_source(model, text, True)
 
-    SetShapeSlider(value) -> refresh(Model(..model, shape_slider: value), False)
+    SetShapeSlider(value) -> {
+      let next = Model(..model, shape_slider: value)
+      case next.ascii_mode {
+        // Slider yaws the view continuously while exploring.
+        True -> {
+          let ang = int.to_float(value) /. 100.0 *. 6.283185307179586
+          maze_frame(Model(..next, player: Player(..next.player, angle: ang)), False)
+        }
+        False -> refresh(next, False)
+      }
+    }
 
     SetSpeed(rate) -> #(
       Model(..model, speed: rate),
@@ -167,18 +221,48 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     )
 
     ToggleAscii -> {
-      let next = Model(..model, ascii_mode: !model.ascii_mode, error: "")
+      let next = Model(..model, ascii_mode: !model.ascii_mode, error: "", pulse: False)
       refresh(next, True)
     }
 
     SetAscii(text) -> {
       persist_ascii(text)
-      let next = Model(..model, ascii_text: text)
+      let maze = ascii_ray.parse_maze(text)
+      let player = ascii_ray.spawn_player(maze)
+      let next =
+        Model(
+          ..model,
+          ascii_text: text,
+          maze:,
+          player:,
+          scan_points: [],
+          pulse: False,
+        )
       case next.ascii_mode {
-        True -> refresh(next, True)
+        True -> maze_frame(next, True)
         False -> #(next, effect.none())
       }
     }
+
+    Scan ->
+      case model.ascii_mode {
+        True -> do_scan(model)
+        False -> #(model, effect.none())
+      }
+
+    ClearPulse -> {
+      let next = Model(..model, pulse: False)
+      case next.ascii_mode {
+        True -> maze_frame(next, False)
+        False -> #(next, effect.none())
+      }
+    }
+
+    Key(k) ->
+      case model.ascii_mode {
+        False -> #(model, effect.none())
+        True -> handle_key(model, k)
+      }
 
     SelectDrawing("") -> {
       let name = data.prompt_drawing_name()
@@ -189,29 +273,14 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         )
         False ->
           case list.key_find(model.drawings, name) {
-            Ok(source) -> {
-              let next = Model(..model, current: name, source:)
-              persist(next)
-              #(
-                next,
-                effect.batch([
-                  editor.mount(source, SetCode),
-                  effect.from(fn(dispatch) { dispatch(SetCode(source)) }),
-                ]),
-              )
-            }
+            Ok(source) -> open_drawing(model, name, source)
             Error(_) -> {
               let source = data.default_new_source()
               let drawings = list.append(model.drawings, [#(name, source)])
-              let next =
-                Model(..model, drawings:, current: name, source:, error: "")
-              persist(next)
-              #(
-                next,
-                effect.batch([
-                  editor.mount(source, SetCode),
-                  effect.from(fn(dispatch) { dispatch(SetCode(source)) }),
-                ]),
+              open_drawing(
+                Model(..model, drawings:, current: name, source:, error: ""),
+                name,
+                source,
               )
             }
           }
@@ -221,17 +290,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     SelectDrawing(name) -> {
       case list.key_find(model.drawings, name) {
         Error(_) -> #(model, effect.none())
-        Ok(source) -> {
-          let next = Model(..model, current: name, source:)
-          persist(next)
-          #(
-            next,
-            effect.batch([
-              editor.mount(source, SetCode),
-              effect.from(fn(dispatch) { dispatch(SetCode(source)) }),
-            ]),
-          )
-        }
+        Ok(source) -> open_drawing(model, name, source)
       }
     }
 
@@ -246,6 +305,62 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       Model(..model, speed: 1.0),
       effect.from(fn(_) { render.set_speed(1.0) }),
     )
+  }
+}
+
+fn open_drawing(
+  model: Model,
+  name: String,
+  source: String,
+) -> #(Model, Effect(Msg)) {
+  let next = Model(..model, current: name, source:)
+  persist(next)
+  #(
+    next,
+    effect.batch([
+      editor.mount(source, SetCode),
+      effect.from(fn(dispatch) { dispatch(SetCode(source)) }),
+    ]),
+  )
+}
+
+fn handle_key(model: Model, k: String) -> #(Model, Effect(Msg)) {
+  case k {
+    " " -> do_scan(model)
+    "ArrowUp" | "w" | "W" -> {
+      let player = ascii_ray.move(model.player, model.maze, 1.0)
+      maze_frame(Model(..model, player:, pulse: False), False)
+    }
+    "ArrowDown" | "s" | "S" -> {
+      let player = ascii_ray.move(model.player, model.maze, -1.0)
+      maze_frame(Model(..model, player:, pulse: False), False)
+    }
+    "ArrowLeft" | "a" | "A" -> {
+      let player = ascii_ray.turn(model.player, -1.0)
+      let slider = angle_to_slider(player.angle)
+      maze_frame(
+        Model(..model, player:, shape_slider: slider, pulse: False),
+        False,
+      )
+    }
+    "ArrowRight" | "d" | "D" -> {
+      let player = ascii_ray.turn(model.player, 1.0)
+      let slider = angle_to_slider(player.angle)
+      maze_frame(
+        Model(..model, player:, shape_slider: slider, pulse: False),
+        False,
+      )
+    }
+    _ -> #(model, effect.none())
+  }
+}
+
+fn angle_to_slider(angle: Float) -> Int {
+  let t = angle /. 6.283185307179586 *. 100.0
+  let n = float.truncate(t) % 100
+  case n < 0 {
+    True -> n + 100
+    False -> n
   }
 }
 
@@ -267,16 +382,11 @@ pub fn view(model: Model) -> Element(Msg) {
 
 fn view_ascii_panel(model: Model) -> Element(Msg) {
   let mode_label = case model.ascii_mode {
-    True -> "ASCII raycast: ON"
-    False -> "ASCII raycast: OFF"
+    True -> "Lidar maze: ON"
+    False -> "Lidar maze: OFF"
   }
-  let grid = ascii_ray.string_to_grid(model.ascii_text)
-  let rows = list.length(grid)
-  let cols = case grid {
-    [row, ..] -> list.length(row)
-    [] -> 0
-  }
-  let dim = int.to_string(rows) <> " × " <> int.to_string(cols) <> " height grid"
+  let #(rows, cols) = ascii_ray.maze_dims(model.maze)
+  let dim = int.to_string(rows) <> " × " <> int.to_string(cols) <> " maze"
   html.div([attr.class("ascii-panel")], [
     html.div([attr.class("ascii-header")], [
       html.button(
@@ -285,7 +395,7 @@ fn view_ascii_panel(model: Model) -> Element(Msg) {
             True -> "icon-btn ascii-toggle on"
             False -> "icon-btn ascii-toggle"
           }),
-          attr.attribute("title", "Toggle ASCII → 3D raycast mode"),
+          attr.attribute("title", "Toggle explorable lidar maze"),
           event.on_click(ToggleAscii),
         ],
         [html.text(mode_label)],
@@ -294,7 +404,17 @@ fn view_ascii_panel(model: Model) -> Element(Msg) {
     ]),
     html.p([attr.class("ascii-hint")], [
       html.text(
-        "Type ASCII (# = tall, digits 1–9 = height, . = empty). Shape spins the camera.",
+        "Maze: . floor, | and _ walls. WASD/arrows move · Space or Scan pings lidar. Walls stay dark until scanned; strip length follows continuous range.",
+      ),
+    ]),
+    html.div([attr.class("ascii-actions")], [
+      html.button(
+        [
+          attr.class("icon-btn scan-btn"),
+          attr.attribute("title", "Lidar scan"),
+          event.on_click(Scan),
+        ],
+        [html.text("Scan")],
       ),
     ]),
     html.textarea(
@@ -327,7 +447,7 @@ fn view_error(model: Model) -> Element(Msg) {
 
 fn view_controls(model: Model) -> Element(Msg) {
   let shape_label = case model.ascii_mode {
-    True -> "Camera"
+    True -> "Look"
     False -> "Shape"
   }
   html.div([attr.class("controls")], [
