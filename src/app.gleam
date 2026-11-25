@@ -740,7 +740,7 @@ fn view_controls(model: Model) -> Element(Msg) {
       "-2",
       "3",
       "0.1",
-      fn(v) { SetSpeed(result.unwrap(float.parse(v), model.speed)) },
+      fn(v) { SetSpeed(parse_speed(v, model.speed)) },
     ),
     html.div([attr.class("playback")], [
       html.button(
@@ -784,6 +784,19 @@ fn view_controls(model: Model) -> Element(Msg) {
       ),
     ]),
   ])
+}
+
+/// Browser range inputs often emit "-2" / "3" without a decimal; Gleam's
+/// `float.parse` rejects those, so fall back through `int.parse`.
+fn parse_speed(raw: String, fallback: Float) -> Float {
+  case float.parse(raw) {
+    Ok(n) -> n
+    Error(_) ->
+      case int.parse(raw) {
+        Ok(n) -> int.to_float(n)
+        Error(_) -> fallback
+      }
+  }
 }
 
 fn view_slider(
