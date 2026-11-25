@@ -10,6 +10,7 @@ import gleam/float
 import gleam/int
 import gleam/list
 import gleam/result
+import gleam/string
 import lustre
 import lustre/attribute as attr
 import lustre/effect.{type Effect}
@@ -53,6 +54,8 @@ pub type Model {
     player: Player,
     scan_points: List(ScanPoint),
     pulse: Bool,
+    /// Lidar spray density 0..100 (maps to ray count).
+    scan_density: Int,
   )
 }
 
@@ -61,11 +64,13 @@ pub type Msg {
   ToggleCode
   SetShapeSlider(Int)
   SetSpeed(Float)
+  SetScanDensity(Int)
   SelectDrawing(String)
   ResetAnim
   PauseAnim
   PlayAnim
   ToggleAscii
+  SetLidar(Bool)
   SetAscii(String)
   Key(String)
   MouseLook(Float)
@@ -82,26 +87,30 @@ fn attach_mouse_look(
   on_scan: fn() -> Nil,
 ) -> Nil
 
+@external(javascript, "./app_keys_ffi.mjs", "attachActions")
+fn attach_actions(set_lidar: fn(Bool) -> Nil, on_scan: fn() -> Nil) -> Nil
+
 // ── Init ───────────────────────────────────────────────────────────────────────
 
 pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
   let lib = data.load_library()
   let source = data.current_source(lib)
-  let ascii_text = case data.storage_get(ascii_storage_key) {
-    Ok(text) if text != "" -> text
-    _ -> ascii_ray.default_ascii
-  }
+  let ascii_text = load_ascii_map()
   let maze = ascii_ray.parse_maze(ascii_text)
   let player = ascii_ray.spawn_player(maze)
   let scan_points = case data.storage_get(lidar_memory_key) {
     Ok(raw) -> ascii_ray.decode_memory(raw)
     Error(_) -> []
   }
+  let maze_error = case ascii_ray.validate_maze(maze) {
+    Ok(_) -> ""
+    Error(msg) -> msg
+  }
   let model =
     Model(
       source:,
       code_open: True,
-      error: "",
+      error: maze_error,
       shape_slider: 50,
       speed: 1.0,
       drawings: lib.drawings,
@@ -112,6 +121,7 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       player:,
       scan_points:,
       pulse: False,
+      scan_density: 55,
     )
   #(
     model,
@@ -123,6 +133,12 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       effect.from(fn(dispatch) {
         attach_mouse_look(
           fn(dx) { dispatch(MouseLook(dx)) },
+          fn() { dispatch(Scan) },
+        )
+      }),
+      effect.from(fn(dispatch) {
+        attach_actions(
+          fn(on) { dispatch(SetLidar(on)) },
           fn() { dispatch(Scan) },
         )
       }),
@@ -145,6 +161,27 @@ fn persist(model: Model) -> Nil {
 
 fn persist_ascii(text: String) -> Nil {
   data.storage_set(ascii_storage_key, text)
+}
+
+fn load_ascii_map() -> String {
+  case data.storage_get(ascii_storage_key) {
+    Ok(text) if text != "" -> {
+      // Drop known-broken defaults; require E on the outer edge.
+      let candidate = case string.contains(text, "|_|_|_|_|_|_|_|_|_|") {
+        True -> ascii_ray.default_ascii
+        False -> text
+      }
+      let maze = ascii_ray.parse_maze(candidate)
+      case ascii_ray.validate_maze(maze) {
+        Ok(_) -> candidate
+        Error(_) -> {
+          persist_ascii(ascii_ray.default_ascii)
+          ascii_ray.default_ascii
+        }
+      }
+    }
+    _ -> ascii_ray.default_ascii
+  }
 }
 
 fn persist_memory(points: List(ScanPoint)) -> Nil {
@@ -198,25 +235,63 @@ fn apply_source(model: Model, text: String, reset: Bool) -> #(Model, Effect(Msg)
 }
 
 fn do_scan(model: Model) -> #(Model, Effect(Msg)) {
-  let points = ascii_ray.scan(model.maze, model.player, model.scan_points)
+  let points =
+    ascii_ray.scan(
+      model.maze,
+      model.player,
+      model.scan_points,
+      model.scan_density,
+    )
   persist_memory(points)
-  let next = Model(..model, scan_points: points, pulse: True)
-  let #(m, fx) = maze_frame(next, True)
+  let next = Model(..model, scan_points: points, pulse: False, speed: 1.0)
+  let #(m, fx) = maze_frame(next, False)
   #(
     m,
-    effect.batch([
-      fx,
-      effect.from(fn(dispatch) {
-        // Brief flash of live depth strips, then fall back to remembered points.
-        let _ = set_timeout(fn() { dispatch(ClearPulse) }, 220)
-        Nil
-      }),
-    ]),
+    effect.batch([fx, effect.from(fn(_) { render.set_speed(1.0) })]),
   )
 }
 
-@external(javascript, "./app_keys_ffi.mjs", "setTimeout")
-fn set_timeout(cb: fn() -> Nil, ms: Int) -> Int
+fn apply_lidar(model: Model, on: Bool) -> #(Model, Effect(Msg)) {
+  case on == model.ascii_mode {
+    True -> #(model, effect.none())
+    False -> {
+      let next =
+        Model(
+          ..model,
+          ascii_mode: on,
+          shape_slider: case on {
+            True -> angle_to_slider(model.player.angle)
+            False -> model.shape_slider
+          },
+          error: "",
+          pulse: False,
+          speed: case on {
+            True -> 1.0
+            False -> model.speed
+          },
+        )
+      case on {
+        True -> {
+          let paths =
+            ascii_ray.render_frame(
+              next.maze,
+              next.player,
+              next.scan_points,
+              False,
+            )
+          #(
+            next,
+            effect.batch([
+              animate(paths, True),
+              effect.from(fn(_) { render.set_speed(1.0) }),
+            ]),
+          )
+        }
+        False -> refresh(next, True)
+      }
+    }
+  }
+}
 
 // ── Update ─────────────────────────────────────────────────────────────────────
 
@@ -224,29 +299,50 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
   case msg {
     ToggleCode -> #(Model(..model, code_open: !model.code_open), effect.none())
 
-    SetCode(text) -> apply_source(model, text, True)
-
-    SetShapeSlider(value) -> {
-      let next = Model(..model, shape_slider: value)
-      case next.ascii_mode {
-        // Slider yaws the view continuously while exploring.
-        True -> {
-          let ang = int.to_float(value) /. 100.0 *. 6.283185307179586
-          maze_frame(Model(..next, player: Player(..next.player, angle: ang)), False)
-        }
-        False -> refresh(next, False)
+    SetCode(text) ->
+      case text == model.source {
+        // CodeMirror can re-emit the same text after a Lustre patch; ignore it
+        // or clicks never land (DOM thrash).
+        True -> #(model, effect.none())
+        False -> apply_source(model, text, True)
       }
-    }
 
-    SetSpeed(rate) -> #(
-      Model(..model, speed: rate),
-      effect.from(fn(_) { render.set_speed(rate) }),
-    )
+    SetShapeSlider(value) ->
+      case value == model.shape_slider {
+        True -> #(model, effect.none())
+        False -> {
+          let next = Model(..model, shape_slider: value)
+          case next.ascii_mode {
+            True -> {
+              let ang = int.to_float(value) /. 100.0 *. 6.283185307179586
+              maze_frame(
+                Model(..next, player: Player(..next.player, angle: ang)),
+                False,
+              )
+            }
+            False -> refresh(next, False)
+          }
+        }
+      }
 
-    ToggleAscii -> {
-      let next = Model(..model, ascii_mode: !model.ascii_mode, error: "", pulse: False)
-      refresh(next, True)
-    }
+    SetSpeed(rate) ->
+      case rate == model.speed {
+        True -> #(model, effect.none())
+        False -> #(
+          Model(..model, speed: rate),
+          effect.from(fn(_) { render.set_speed(rate) }),
+        )
+      }
+
+    SetScanDensity(value) ->
+      case value == model.scan_density {
+        True -> #(model, effect.none())
+        False -> #(Model(..model, scan_density: int.clamp(value, 0, 100)), effect.none())
+      }
+
+    ToggleAscii -> apply_lidar(model, !model.ascii_mode)
+
+    SetLidar(on) -> apply_lidar(model, on)
 
     SetAscii(text) -> {
       persist_ascii(text)
@@ -254,6 +350,10 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       let player = ascii_ray.spawn_player(maze)
       // New maze → wipe memory so stale walls don't linger.
       persist_memory([])
+      let maze_error = case ascii_ray.validate_maze(maze) {
+        Ok(_) -> ""
+        Error(msg) -> msg
+      }
       let next =
         Model(
           ..model,
@@ -262,6 +362,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           player:,
           scan_points: [],
           pulse: False,
+          error: maze_error,
         )
       case next.ascii_mode {
         True -> maze_frame(next, True)
@@ -271,8 +372,12 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
 
     Scan ->
       case model.ascii_mode {
-        True -> do_scan(model)
         False -> #(model, effect.none())
+        True ->
+          case ascii_ray.validate_maze(model.maze) {
+            Error(msg) -> #(Model(..model, error: msg), effect.none())
+            Ok(_) -> do_scan(model)
+          }
       }
 
     ClearPulse -> {
@@ -284,9 +389,14 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     }
 
     Key(k) ->
-      case model.ascii_mode {
-        False -> #(model, effect.none())
-        True -> handle_key(model, k)
+      case k {
+        // Mode toggle works even when lidar is off.
+        "l" | "L" -> handle_key(model, k)
+        _ ->
+          case model.ascii_mode {
+            False -> #(model, effect.none())
+            True -> handle_key(model, k)
+          }
       }
 
     MouseLook(dx) ->
@@ -364,6 +474,7 @@ fn open_drawing(
 
 fn handle_key(model: Model, k: String) -> #(Model, Effect(Msg)) {
   case k {
+    "l" | "L" -> apply_lidar(model, !model.ascii_mode)
     " " -> do_scan(model)
     "ArrowUp" | "w" | "W" -> {
       let player = ascii_ray.move(model.player, model.maze, 1.0)
@@ -409,7 +520,18 @@ pub fn view(model: Model) -> Element(Msg) {
     True -> "app"
     False -> "app code-hidden"
   }
-  html.div([attr.class(app_class)], [
+  html.div(
+    [
+      attr.class(app_class),
+      attr.attribute(
+        "data-lidar",
+        case model.ascii_mode {
+          True -> "on"
+          False -> "off"
+        },
+      ),
+    ],
+    [
     html.div([attr.class("code-col")], [
       editor.view_panel(ToggleCode),
       view_ascii_panel(model),
@@ -434,15 +556,16 @@ fn view_ascii_panel(model: Model) -> Element(Msg) {
             False -> "icon-btn ascii-toggle"
           }),
           attr.attribute("title", "Toggle explorable lidar maze"),
-          event.on_click(ToggleAscii),
+          attr.attribute("data-action", "lidar-toggle"),
         ],
         [html.text(mode_label)],
       ),
       html.span([attr.class("ascii-dim")], [html.text(dim)]),
     ]),
+    view_player_hud(model),
     html.p([attr.class("ascii-hint")], [
       html.text(
-        "Scanner Sombre–style: pitch dark until you paint lidar dots. Rescan to densify. WASD · click canvas to look · click/Space spray · Esc unlocks. E = green exit.",
+        "E must sit on the outer edge. Density slider = rays per spray. You are @. L · WASD · look · Scan/Space.",
       ),
     ]),
     html.div([attr.class("ascii-actions")], [
@@ -450,16 +573,26 @@ fn view_ascii_panel(model: Model) -> Element(Msg) {
         [
           attr.class("icon-btn scan-btn"),
           attr.attribute("title", "Lidar scan"),
-          event.on_click(Scan),
+          attr.attribute("data-action", "lidar-scan"),
         ],
         [html.text("Scan")],
       ),
     ]),
+    case model.ascii_mode {
+      True ->
+        html.pre([attr.class("ascii-map"), attr.attribute("aria-label", "Live maze with player")], [
+          html.text(ascii_ray.map_with_player(model.ascii_text, model.player)),
+        ])
+      False -> element.none()
+    },
     html.textarea(
       [
         attr.class("ascii-input"),
         attr.attribute("spellcheck", "false"),
-        attr.rows(8),
+        attr.rows(case model.ascii_mode {
+          True -> 4
+          False -> 8
+        }),
         event.on_input(SetAscii),
       ],
       model.ascii_text,
@@ -467,13 +600,97 @@ fn view_ascii_panel(model: Model) -> Element(Msg) {
   ])
 }
 
+fn view_player_hud(model: Model) -> Element(Msg) {
+  let #(col, row) = ascii_ray.player_cell(model.player)
+  let ch = ascii_ray.cell_char(model.maze, col, row)
+  let face = ascii_ray.facing_arrow(model.player.angle)
+  let won = ascii_ray.at_exit(model.maze, model.player)
+  let label = case won {
+    True ->
+      "ESCAPED · array["
+      <> int.to_string(row)
+      <> "]["
+      <> int.to_string(col)
+      <> "] = 'E'"
+    False ->
+      "array["
+      <> int.to_string(row)
+      <> "]["
+      <> int.to_string(col)
+      <> "] = '"
+      <> ch
+      <> "'  "
+      <> face
+      <> "  ("
+      <> float_str(model.player.x)
+      <> ", "
+      <> float_str(model.player.y)
+      <> ")"
+  }
+  html.div(
+    [
+      attr.class(case model.ascii_mode {
+        True ->
+          case won {
+            True -> "ascii-hud on win"
+            False -> "ascii-hud on"
+          }
+        False -> "ascii-hud"
+      }),
+      attr.attribute("title", "Your cell in maze[row][col]"),
+    ],
+    [html.text(label)],
+  )
+}
+
+fn float_str(x: Float) -> String {
+  let n = float.truncate(x *. 10.0)
+  let whole = n / 10
+  let frac = int.absolute_value(n % 10)
+  int.to_string(whole) <> "." <> int.to_string(frac)
+}
+
 fn view_anim(model: Model) -> Element(Msg) {
   html.div([attr.class("canvas-area")], [
     view_reveal_code(model),
     html.canvas([attr.id("animation-canvas"), attr.class("canvas")]),
+    case model.ascii_mode {
+      True -> view_canvas_pos(model)
+      False -> element.none()
+    },
     view_error(model),
     view_controls(model),
   ])
+}
+
+fn view_canvas_pos(model: Model) -> Element(Msg) {
+  let #(col, row) = ascii_ray.player_cell(model.player)
+  let ch = ascii_ray.cell_char(model.maze, col, row)
+  let face = ascii_ray.facing_arrow(model.player.angle)
+  let won = ascii_ray.at_exit(model.maze, model.player)
+  html.div(
+    [
+      attr.class(case won {
+        True -> "canvas-pos win"
+        False -> "canvas-pos"
+      }),
+    ],
+    [
+      html.text(case won {
+        True ->
+          "ESCAPED [" <> int.to_string(row) <> "][" <> int.to_string(col) <> "]"
+        False ->
+          "["
+          <> int.to_string(row)
+          <> "]["
+          <> int.to_string(col)
+          <> "] '"
+          <> ch
+          <> "' "
+          <> face
+      }),
+    ],
+  )
 }
 
 fn view_error(model: Model) -> Element(Msg) {
@@ -501,6 +718,21 @@ fn view_controls(model: Model) -> Element(Msg) {
         SetShapeSlider(result.unwrap(int.parse(v), model.shape_slider))
       },
     ),
+    case model.ascii_mode {
+      True ->
+        view_slider(
+          "Density",
+          "density-slider",
+          int.to_string(model.scan_density),
+          "0",
+          "100",
+          "1",
+          fn(v) {
+            SetScanDensity(result.unwrap(int.parse(v), model.scan_density))
+          },
+        )
+      False -> element.none()
+    },
     view_slider(
       "Speed",
       "speed-slider",
@@ -511,6 +743,21 @@ fn view_controls(model: Model) -> Element(Msg) {
       fn(v) { SetSpeed(result.unwrap(float.parse(v), model.speed)) },
     ),
     html.div([attr.class("playback")], [
+      html.button(
+        [
+          attr.class("icon-btn scan-btn"),
+          attr.attribute("title", "Lidar scan"),
+          attr.attribute("data-action", "lidar-scan"),
+          attr.attribute(
+            "style",
+            case model.ascii_mode {
+              True -> ""
+              False -> "opacity:0.4"
+            },
+          ),
+        ],
+        [html.text("Scan")],
+      ),
       html.button(
         [
           attr.class("icon-btn"),

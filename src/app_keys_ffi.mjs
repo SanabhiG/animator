@@ -5,6 +5,59 @@ export function setTimeout(cb, ms) {
   return globalThis.setTimeout(cb, ms);
 }
 
+export function debugLog(s) {
+  console.log("[animator]", s);
+  globalThis.__animatorLog = (globalThis.__animatorLog || []).concat([s]);
+}
+
+/** Drop duplicate toggle events (automation / double-bound handlers). */
+export function shouldToggle() {
+  const now = performance.now();
+  if (now - (globalThis.__animatorLastToggle || 0) < 400) return false;
+  globalThis.__animatorLastToggle = now;
+  return true;
+}
+
+/**
+ * Document-level lidar actions. Bypasses Lustre's vdom event-path cache
+ * (which breaks when the DOM is instrumented). Callbacks are swapped on
+ * every attach; the listener is registered once.
+ */
+export function attachActions(setLidar, onScan) {
+  globalThis.__animatorSetLidar = setLidar;
+  globalThis.__animatorOnScan = onScan;
+  if (globalThis.__animatorActionsBound) return;
+  globalThis.__animatorActionsBound = true;
+  let lastToggleAt = 0;
+  globalThis.__animatorActionHandler = (e) => {
+    const el = e.target?.closest?.("[data-action]");
+    if (!el) return;
+    const action = el.getAttribute("data-action");
+    if (action === "lidar-toggle") {
+      e.preventDefault();
+      e.stopPropagation();
+      const now = performance.now();
+      if (now - lastToggleAt < 250) return;
+      lastToggleAt = now;
+      const wantOn = document.querySelector(".app")?.dataset?.lidar !== "on";
+      try {
+        globalThis.__animatorSetLidar?.(wantOn);
+      } catch (err) {
+        console.error("lidar toggle failed", err);
+      }
+    } else if (action === "lidar-scan") {
+      e.preventDefault();
+      e.stopPropagation();
+      try {
+        globalThis.__animatorOnScan?.();
+      } catch (err) {
+        console.error("lidar scan failed", err);
+      }
+    }
+  };
+  document.addEventListener("click", globalThis.__animatorActionHandler, true);
+}
+
 export function attachKeys(onKey) {
   if (keysAttached) return;
   keysAttached = true;
@@ -27,7 +80,9 @@ export function attachKeys(onKey) {
       k === "A" ||
       k === "S" ||
       k === "D" ||
-      k === " "
+      k === " " ||
+      k === "l" ||
+      k === "L"
     ) {
       e.preventDefault();
       onKey(k);

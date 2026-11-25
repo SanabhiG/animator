@@ -1,11 +1,8 @@
-Lidar Maze Explorer (Scanner Sombre–style)
+Lidar Maze Explorer
 
-Inspired by Scanner Sombre: the maze is pitch dark and you reveal it by spraying
-a permanent LIDAR point cloud. Mazes use '.' floor, '|' / '_' walls, and 'E' for
-a green exit. WASD moves; click the canvas for mouse-look; click/Space sprays
-dots. Each scan adds more speckles (with angular jitter so gaps fill in) —
-rescanning the same place makes the cloud denser and the geometry clearer,
-rather than replacing or stacking wall columns. Only near-exact duplicates are
-skipped. Specks are colored by depth (warm near, cool far); exits stay green.
-Memory persists in localStorage. Fisheye-corrected continuous depth drives the
-brief live pulse. Normal Gleam draw mode is unchanged.
+An explorable ASCII maze revealed by lidar scan lines. Mazes use '.' floor,
+'|' / '_' walls, and 'E' for a green exit. Toggle lidar mode, then WASD to move,
+click the canvas for mouse-look, and click/Space to spray. Each ray paints a
+vertical depth-colored line (cyan near → blue far; exits green). Scans accumulate
+into permanent memory (localStorage) so rescanning densifies the view. Normal
+Gleam draw mode is unchanged.
