@@ -1,5 +1,6 @@
 //// Animator -- an application for program-generated drawings.
 
+import ascii_ray
 import builtins
 import data.{Library}
 import drawing
@@ -32,6 +33,8 @@ pub const video_url = ""
 /// Set to True if you would like your video included in the course gallery.
 pub const include_video_in_gallery = False
 
+const ascii_storage_key = "animator-ascii-map"
+
 // ── Model ──────────────────────────────────────────────────────────────────────
 
 pub type Model {
@@ -43,6 +46,8 @@ pub type Model {
     speed: Float,
     drawings: List(#(String, String)),
     current: String,
+    ascii_mode: Bool,
+    ascii_text: String,
   )
 }
 
@@ -55,6 +60,8 @@ pub type Msg {
   ResetAnim
   PauseAnim
   PlayAnim
+  ToggleAscii
+  SetAscii(String)
 }
 
 // ── Init ───────────────────────────────────────────────────────────────────────
@@ -62,6 +69,10 @@ pub type Msg {
 pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
   let lib = data.load_library()
   let source = data.current_source(lib)
+  let ascii_text = case data.storage_get(ascii_storage_key) {
+    Ok(text) if text != "" -> text
+    _ -> ascii_ray.default_ascii
+  }
   let model =
     Model(
       source:,
@@ -71,6 +82,8 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       speed: 1.0,
       drawings: lib.drawings,
       current: lib.current,
+      ascii_mode: False,
+      ascii_text:,
     )
   #(
     model,
@@ -95,6 +108,10 @@ fn persist(model: Model) -> Nil {
   data.save_library(Library(model.drawings, model.current))
 }
 
+fn persist_ascii(text: String) -> Nil {
+  data.storage_set(ascii_storage_key, text)
+}
+
 fn animate(paths: List(Path), reset: Bool) -> Effect(Msg) {
   effect.from(fn(_) {
     case reset {
@@ -112,14 +129,26 @@ fn clear_drawing() -> Effect(Msg) {
   })
 }
 
+fn refresh(model: Model, reset: Bool) -> #(Model, Effect(Msg)) {
+  case model.ascii_mode {
+    True -> {
+      let paths =
+        ascii_ray.render_ascii(model.ascii_text, model.shape_slider)
+      #(Model(..model, error: ""), animate(paths, reset))
+    }
+    False ->
+      case run_source(model.shape_slider, model.source) {
+        Ok(paths) -> #(Model(..model, error: ""), animate(paths, reset))
+        Error(msg) -> #(Model(..model, error: msg), clear_drawing())
+      }
+  }
+}
+
 fn apply_source(model: Model, text: String, reset: Bool) -> #(Model, Effect(Msg)) {
   let drawings = data.update_drawing(model.drawings, model.current, text)
   let next = Model(..model, source: text, drawings:)
   persist(next)
-  case run_source(next.shape_slider, text) {
-    Ok(paths) -> #(Model(..next, error: ""), animate(paths, reset))
-    Error(msg) -> #(Model(..next, error: msg), clear_drawing())
-  }
+  refresh(next, reset)
 }
 
 // ── Update ─────────────────────────────────────────────────────────────────────
@@ -130,24 +159,34 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
 
     SetCode(text) -> apply_source(model, text, True)
 
-    SetShapeSlider(value) -> {
-      let next = Model(..model, shape_slider: value)
-      case run_source(value, next.source) {
-        Ok(paths) -> #(Model(..next, error: ""), animate(paths, False))
-        Error(msg) -> #(Model(..next, error: msg), clear_drawing())
-      }
-    }
+    SetShapeSlider(value) -> refresh(Model(..model, shape_slider: value), False)
 
     SetSpeed(rate) -> #(
       Model(..model, speed: rate),
       effect.from(fn(_) { render.set_speed(rate) }),
     )
 
+    ToggleAscii -> {
+      let next = Model(..model, ascii_mode: !model.ascii_mode, error: "")
+      refresh(next, True)
+    }
+
+    SetAscii(text) -> {
+      persist_ascii(text)
+      let next = Model(..model, ascii_text: text)
+      case next.ascii_mode {
+        True -> refresh(next, True)
+        False -> #(next, effect.none())
+      }
+    }
+
     SelectDrawing("") -> {
       let name = data.prompt_drawing_name()
       case name == "" {
-        // Re-assert the open drawing so the <select> doesn't stay on "".
-        True -> #(model, effect.from(fn(dispatch) { dispatch(SelectDrawing(model.current)) }))
+        True -> #(
+          model,
+          effect.from(fn(dispatch) { dispatch(SelectDrawing(model.current)) }),
+        )
         False ->
           case list.key_find(model.drawings, name) {
             Ok(source) -> {
@@ -218,8 +257,55 @@ pub fn view(model: Model) -> Element(Msg) {
     False -> "app code-hidden"
   }
   html.div([attr.class(app_class)], [
-    html.div([attr.class("code-col")], [editor.view_panel(ToggleCode)]),
+    html.div([attr.class("code-col")], [
+      editor.view_panel(ToggleCode),
+      view_ascii_panel(model),
+    ]),
     view_anim(model),
+  ])
+}
+
+fn view_ascii_panel(model: Model) -> Element(Msg) {
+  let mode_label = case model.ascii_mode {
+    True -> "ASCII raycast: ON"
+    False -> "ASCII raycast: OFF"
+  }
+  let grid = ascii_ray.string_to_grid(model.ascii_text)
+  let rows = list.length(grid)
+  let cols = case grid {
+    [row, ..] -> list.length(row)
+    [] -> 0
+  }
+  let dim = int.to_string(rows) <> " × " <> int.to_string(cols) <> " height grid"
+  html.div([attr.class("ascii-panel")], [
+    html.div([attr.class("ascii-header")], [
+      html.button(
+        [
+          attr.class(case model.ascii_mode {
+            True -> "icon-btn ascii-toggle on"
+            False -> "icon-btn ascii-toggle"
+          }),
+          attr.attribute("title", "Toggle ASCII → 3D raycast mode"),
+          event.on_click(ToggleAscii),
+        ],
+        [html.text(mode_label)],
+      ),
+      html.span([attr.class("ascii-dim")], [html.text(dim)]),
+    ]),
+    html.p([attr.class("ascii-hint")], [
+      html.text(
+        "Type ASCII (# = tall, digits 1–9 = height, . = empty). Shape spins the camera.",
+      ),
+    ]),
+    html.textarea(
+      [
+        attr.class("ascii-input"),
+        attr.attribute("spellcheck", "false"),
+        attr.rows(8),
+        event.on_input(SetAscii),
+      ],
+      model.ascii_text,
+    ),
   ])
 }
 
@@ -235,16 +321,19 @@ fn view_anim(model: Model) -> Element(Msg) {
 fn view_error(model: Model) -> Element(Msg) {
   case model.error {
     "" -> element.none()
-    msg ->
-      html.pre([attr.class("error-banner")], [html.text(msg)])
+    msg -> html.pre([attr.class("error-banner")], [html.text(msg)])
   }
 }
 
 fn view_controls(model: Model) -> Element(Msg) {
+  let shape_label = case model.ascii_mode {
+    True -> "Camera"
+    False -> "Shape"
+  }
   html.div([attr.class("controls")], [
     view_drawing_select(model),
     view_slider(
-      "Shape",
+      shape_label,
       "shape-slider",
       int.to_string(model.shape_slider),
       "0",
@@ -261,21 +350,31 @@ fn view_controls(model: Model) -> Element(Msg) {
       "-2",
       "3",
       "0.1",
-      fn(v) {
-        SetSpeed(result.unwrap(float.parse(v), model.speed))
-      },
+      fn(v) { SetSpeed(result.unwrap(float.parse(v), model.speed)) },
     ),
     html.div([attr.class("playback")], [
       html.button(
-        [attr.class("icon-btn"), attr.attribute("title", "Play"), event.on_click(PlayAnim)],
+        [
+          attr.class("icon-btn"),
+          attr.attribute("title", "Play"),
+          event.on_click(PlayAnim),
+        ],
         [html.text("▶")],
       ),
       html.button(
-        [attr.class("icon-btn"), attr.attribute("title", "Pause"), event.on_click(PauseAnim)],
+        [
+          attr.class("icon-btn"),
+          attr.attribute("title", "Pause"),
+          event.on_click(PauseAnim),
+        ],
         [html.text("❚❚")],
       ),
       html.button(
-        [attr.class("icon-btn"), attr.attribute("title", "Reset"), event.on_click(ResetAnim)],
+        [
+          attr.class("icon-btn"),
+          attr.attribute("title", "Reset"),
+          event.on_click(ResetAnim),
+        ],
         [html.text("↺")],
       ),
     ]),
@@ -314,8 +413,7 @@ fn view_drawing_select(model: Model) -> Element(Msg) {
         name,
       )
     })
-  let new_option =
-    html.option([attr.value("")], "＋ New drawing…")
+  let new_option = html.option([attr.value("")], "＋ New drawing…")
   html.label([attr.class("control drawing-select")], [
     html.span([attr.class("control-label")], [html.text("Drawing")]),
     html.select(

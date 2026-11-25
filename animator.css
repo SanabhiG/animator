@@ -15,13 +15,14 @@ html, body { width: 100%; height: 100%; overflow: hidden; }
   font-size: 14px;
 }
 
-/* Left column: the code editor. */
+/* Left column: the code editor + ASCII raycast panel. */
 .code-col {
   width: 42%;
   min-width: 320px;
   max-width: 720px;
   flex-shrink: 0;
   display: flex;
+  flex-direction: column;
   border-right: 1px solid #3a3a5e;
   background: #0f0f1e;
 }
@@ -265,5 +266,63 @@ html, body { width: 100%; height: 100%; overflow: hidden; }
 .app.code-hidden .error-banner {
   padding-left: 48px;
 }
+
+/* ASCII → height-grid → raycast panel under the code editor. */
+.ascii-panel {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 14px 12px;
+  border-top: 1px solid #3a3a5e;
+  background: #12122a;
+}
+
+.ascii-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ascii-toggle.on {
+  background: #3a5a4a;
+  border-color: #6a9a7a;
+  color: #d8f0e0;
+}
+
+.ascii-dim {
+  color: #8a8aca;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+}
+
+.ascii-hint {
+  color: #6a7a8a;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.ascii-input {
+  width: 100%;
+  min-height: 110px;
+  resize: vertical;
+  background: #0d0d1a;
+  color: #c3e88d;
+  border: 1px solid #3a3a5e;
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 13px;
+  line-height: 1.25;
+  white-space: pre;
+  tab-size: 2;
+}
+
+.ascii-input:focus {
+  outline: none;
+  border-color: #89ddff;
+}
+
 
 

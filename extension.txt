@@ -1,17 +1,18 @@
-Colored Geometry Toolkit
+ASCII → Height Grid → Pseudo-3D Raycast
 
-This extension adds first-class color and curved shapes to Animator drawings
-without changing Point, Line, or Path. Users can write ColorLine(start, end, r,
-g, b) for an RGB-colored segment and Circle(center, radius) or
-ColorCircle(center, radius, r, g, b) for closed curves. Circles are turned into
-smooth polylines by the renderer so the existing canvas loop can animate them
-the same way as lines.
+This extension turns a typed ASCII string into an m×n 2D height array, then
+draws a first-person raycast of that map on the Animator canvas. Each character
+becomes a cell height: '.' and spaces are empty, '#' / '@' / '*' are tall walls,
+digits 1–9 set explicit heights, and other marks are medium walls. Rows are
+padded so the grid is rectangular; the UI shows the live m×n dimensions.
 
-Plain Line paths still work; the app paints them from a rotating pastel palette
-so multi-path drawings stay readable. The built-ins panel documents the new
-constructors, and a new starter drawing, "colored_orbits", shows nested colored
-circles and spokes that react to the shape slider.
+With ASCII raycast mode on, the shape slider orbits the camera. Each screen
+column casts a ray through the grid; hits become ColorLine vertical strips whose
+length and shade depend on distance and wall height, so closer walls look taller
+and brighter. A small top-down inset of occupied cells is drawn in the corner so
+you can see the 2D array while the 3D view updates. The map is stored in
+localStorage and edited in a dedicated textarea under the code panel.
 
-Together, palette defaults plus explicit RGB shapes let people design intentional
-color systems in Gleam rather than accepting a single automatic stroke color,
-while keeping Gradescope's Line/Path tests intact.
+The earlier Colored Geometry Toolkit remains: ColorLine, Circle, and ColorCircle
+still work in normal draw mode. ASCII raycast is a separate mode so Gradescope's
+Line/Path drawing tests keep using the interpreter unchanged.
