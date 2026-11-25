@@ -67,12 +67,16 @@ pub type Msg {
   ToggleAscii
   SetAscii(String)
   Key(String)
+  MouseLook(Float)
   Scan
   ClearPulse
 }
 
 @external(javascript, "./app_keys_ffi.mjs", "attachKeys")
 fn attach_keys(on_key: fn(String) -> Nil) -> Nil
+
+@external(javascript, "./app_keys_ffi.mjs", "attachMouseLook")
+fn attach_mouse_look(on_delta: fn(Float) -> Nil) -> Nil
 
 // ── Init ───────────────────────────────────────────────────────────────────────
 
@@ -108,6 +112,9 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       effect.from(fn(dispatch) { dispatch(SetCode(source)) }),
       effect.from(fn(_) { render.set_speed(1.0) }),
       effect.from(fn(dispatch) { attach_keys(fn(k) { dispatch(Key(k)) }) }),
+      effect.from(fn(dispatch) {
+        attach_mouse_look(fn(dx) { dispatch(MouseLook(dx)) })
+      }),
     ]),
   )
 }
@@ -264,6 +271,19 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         True -> handle_key(model, k)
       }
 
+    MouseLook(dx) ->
+      case model.ascii_mode {
+        False -> #(model, effect.none())
+        True -> {
+          let player = ascii_ray.look_mouse(model.player, dx)
+          let slider = angle_to_slider(player.angle)
+          maze_frame(
+            Model(..model, player:, shape_slider: slider, pulse: False),
+            False,
+          )
+        }
+      }
+
     SelectDrawing("") -> {
       let name = data.prompt_drawing_name()
       case name == "" {
@@ -404,7 +424,7 @@ fn view_ascii_panel(model: Model) -> Element(Msg) {
     ]),
     html.p([attr.class("ascii-hint")], [
       html.text(
-        "Maze: . floor, | and _ walls. WASD/arrows move · Space or Scan pings lidar. Walls stay dark until scanned; strip length follows continuous range.",
+        "Maze: . floor, | _ walls, E exit (green). WASD move · click canvas for mouse-look · Space/Scan lidar. Fisheye-corrected continuous depth.",
       ),
     ]),
     html.div([attr.class("ascii-actions")], [

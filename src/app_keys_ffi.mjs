@@ -1,12 +1,13 @@
-let attached = false;
+let keysAttached = false;
+let lookAttached = false;
 
 export function setTimeout(cb, ms) {
   return globalThis.setTimeout(cb, ms);
 }
 
 export function attachKeys(onKey) {
-  if (attached) return;
-  attached = true;
+  if (keysAttached) return;
+  keysAttached = true;
   window.addEventListener("keydown", (e) => {
     const tag = (e.target && e.target.tagName) || "";
     if (tag === "TEXTAREA" || tag === "INPUT" || e.target?.isContentEditable) {
@@ -32,4 +33,41 @@ export function attachKeys(onKey) {
       onKey(k);
     }
   });
+}
+
+/** Click the canvas to pointer-lock; mouse X then yaws look. */
+export function attachMouseLook(onDelta) {
+  if (lookAttached) return;
+  lookAttached = true;
+
+  const bind = (canvas) => {
+    if (!canvas || canvas.dataset.lookBound === "1") return;
+    canvas.dataset.lookBound = "1";
+    canvas.style.cursor = "crosshair";
+    canvas.title = "Click to mouse-look (Esc to release)";
+
+    canvas.addEventListener("click", () => {
+      if (document.pointerLockElement !== canvas) {
+        canvas.requestPointerLock?.();
+      }
+    });
+
+    document.addEventListener("pointerlockchange", () => {
+      canvas.style.cursor =
+        document.pointerLockElement === canvas ? "none" : "crosshair";
+    });
+
+    document.addEventListener("mousemove", (e) => {
+      if (document.pointerLockElement !== canvas) return;
+      if (e.movementX === 0) return;
+      onDelta(e.movementX);
+    });
+  };
+
+  const tryBind = () => {
+    const canvas = document.getElementById("animation-canvas");
+    if (canvas) bind(canvas);
+    else requestAnimationFrame(tryBind);
+  };
+  tryBind();
 }
