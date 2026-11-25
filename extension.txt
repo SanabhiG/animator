@@ -1,0 +1,17 @@
+Colored Geometry Toolkit
+
+This extension adds first-class color and curved shapes to Animator drawings
+without changing Point, Line, or Path. Users can write ColorLine(start, end, r,
+g, b) for an RGB-colored segment and Circle(center, radius) or
+ColorCircle(center, radius, r, g, b) for closed curves. Circles are turned into
+smooth polylines by the renderer so the existing canvas loop can animate them
+the same way as lines.
+
+Plain Line paths still work; the app paints them from a rotating pastel palette
+so multi-path drawings stay readable. The built-ins panel documents the new
+constructors, and a new starter drawing, "colored_orbits", shows nested colored
+circles and spokes that react to the shape slider.
+
+Together, palette defaults plus explicit RGB shapes let people design intentional
+color systems in Gleam rather than accepting a single automatic stroke color,
+while keeping Gradescope's Line/Path tests intact.
