@@ -1,8 +1,11 @@
 //// Top-down maze (`_ . | E`) → explorable lidar raycast.
 //// Distances use fisheye-corrected perpendicular depth so strip lengths stay smooth.
 
+import gleam/dict
+import gleam/dynamic/decode
 import gleam/float
 import gleam/int
+import gleam/json
 import gleam/list
 import gleam/string
 import shape.{type Path, ColorLine, Path, Point}
@@ -310,6 +313,10 @@ fn cast_loop(
 
 // ── Lidar scan ────────────────────────────────────────────────────────────────
 
+const quantize = 0.08
+
+/// Merge new hits into permanent memory. Points never fade; rescans only add
+/// coverage. Nearby hits snap to a fine grid so duplicates collapse.
 pub fn scan(
   maze: Maze,
   player: Player,
@@ -321,11 +328,9 @@ pub fn scan(
       let ang = player.angle -. fov /. 2.0 +. u *. fov
       case cast_ray(maze, player.x, player.y, ang) {
         Nothing -> Nothing
-        Just(hit) -> {
-          let depth = perp_dist(hit.distance, ang, player.angle)
-          let strength = float.max(0.15, 1.0 -. depth /. max_ray_dist)
-          Just(ScanPoint(hit.wx, hit.wy, strength, hit.is_exit))
-        }
+        Just(hit) ->
+          // Full-strength memory — distance only affects live pulse strips.
+          Just(ScanPoint(hit.wx, hit.wy, 1.0, hit.is_exit))
       }
     })
     |> list.filter_map(fn(m) {
@@ -334,10 +339,75 @@ pub fn scan(
         Nothing -> Error(Nil)
       }
     })
-  let faded =
-    list.map(existing, fn(p) { ScanPoint(..p, strength: p.strength *. 0.55) })
-    |> list.filter(fn(p) { p.strength >. 0.08 })
-  list.append(fresh, list.take(faded, 800))
+  merge_memory(existing, fresh)
+}
+
+fn point_key(p: ScanPoint) -> String {
+  let qx = float.truncate(p.x /. quantize)
+  let qy = float.truncate(p.y /. quantize)
+  let exit = case p.is_exit {
+    True -> "1"
+    False -> "0"
+  }
+  int.to_string(qx) <> "," <> int.to_string(qy) <> "," <> exit
+}
+
+fn merge_memory(
+  existing: List(ScanPoint),
+  fresh: List(ScanPoint),
+) -> List(ScanPoint) {
+  let start =
+    list.fold(existing, dict.new(), fn(acc, p) {
+      dict.insert(acc, point_key(p), p)
+    })
+  list.fold(fresh, start, fn(acc, p) {
+    let key = point_key(p)
+    case dict.get(acc, key) {
+      Ok(old) ->
+        dict.insert(
+          acc,
+          key,
+          ScanPoint(
+            // Keep a stable sample; mark exit if either saw it.
+            old.x,
+            old.y,
+            1.0,
+            old.is_exit || p.is_exit,
+          ),
+        )
+      Error(_) -> dict.insert(acc, key, ScanPoint(..p, strength: 1.0))
+    }
+  })
+  |> dict.values
+}
+
+/// Encode the full lidar memory for localStorage.
+pub fn encode_memory(points: List(ScanPoint)) -> String {
+  list.map(points, fn(p) {
+    json.object([
+      #("x", json.float(p.x)),
+      #("y", json.float(p.y)),
+      #("s", json.float(p.strength)),
+      #("e", json.bool(p.is_exit)),
+    ])
+  })
+  |> json.preprocessed_array
+  |> json.to_string
+}
+
+/// Decode lidar memory; empty list on failure.
+pub fn decode_memory(raw: String) -> List(ScanPoint) {
+  let point = {
+    use x <- decode.field("x", decode.float)
+    use y <- decode.field("y", decode.float)
+    use s <- decode.field("s", decode.float)
+    use e <- decode.field("e", decode.bool)
+    decode.success(ScanPoint(x, y, s, e))
+  }
+  case json.parse(raw, decode.list(point)) {
+    Ok(points) -> points
+    Error(_) -> []
+  }
 }
 
 // ── Rendering ─────────────────────────────────────────────────────────────────

@@ -34,6 +34,7 @@ pub const video_url = ""
 pub const include_video_in_gallery = False
 
 const ascii_storage_key = "animator-ascii-map"
+const lidar_memory_key = "animator-lidar-memory"
 
 // ── Model ──────────────────────────────────────────────────────────────────────
 
@@ -92,6 +93,10 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
   }
   let maze = ascii_ray.parse_maze(ascii_text)
   let player = ascii_ray.spawn_player(maze)
+  let scan_points = case data.storage_get(lidar_memory_key) {
+    Ok(raw) -> ascii_ray.decode_memory(raw)
+    Error(_) -> []
+  }
   let model =
     Model(
       source:,
@@ -105,7 +110,7 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       ascii_text:,
       maze:,
       player:,
-      scan_points: [],
+      scan_points:,
       pulse: False,
     )
   #(
@@ -140,6 +145,10 @@ fn persist(model: Model) -> Nil {
 
 fn persist_ascii(text: String) -> Nil {
   data.storage_set(ascii_storage_key, text)
+}
+
+fn persist_memory(points: List(ScanPoint)) -> Nil {
+  data.storage_set(lidar_memory_key, ascii_ray.encode_memory(points))
 }
 
 fn animate(paths: List(Path), reset: Bool) -> Effect(Msg) {
@@ -190,6 +199,7 @@ fn apply_source(model: Model, text: String, reset: Bool) -> #(Model, Effect(Msg)
 
 fn do_scan(model: Model) -> #(Model, Effect(Msg)) {
   let points = ascii_ray.scan(model.maze, model.player, model.scan_points)
+  persist_memory(points)
   let next = Model(..model, scan_points: points, pulse: True)
   let #(m, fx) = maze_frame(next, True)
   #(
@@ -242,6 +252,8 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       persist_ascii(text)
       let maze = ascii_ray.parse_maze(text)
       let player = ascii_ray.spawn_player(maze)
+      // New maze → wipe memory so stale walls don't linger.
+      persist_memory([])
       let next =
         Model(
           ..model,
@@ -430,7 +442,7 @@ fn view_ascii_panel(model: Model) -> Element(Msg) {
     ]),
     html.p([attr.class("ascii-hint")], [
       html.text(
-        "Maze: . floor, | _ walls, E exit (green). WASD move · click canvas to mouse-look · while locked, click or Space to scan · Esc unlocks.",
+        "Maze: . floor, | _ walls, E exit (green). WASD move · click canvas to mouse-look · click/Space scan (memory keeps every hit) · Esc unlocks.",
       ),
     ]),
     html.div([attr.class("ascii-actions")], [
