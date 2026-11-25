@@ -38,10 +38,14 @@ export function attachKeys(onKey) {
 /**
  * Click canvas to pointer-lock (look with mouse).
  * While locked: left-click = lidar scan (Space still works too).
+ * Lock click itself does not scan; scans are debounced.
  */
 export function attachMouseLook(onDelta, onScan) {
   if (lookAttached) return;
   lookAttached = true;
+
+  let lockAt = 0;
+  let lastScanAt = 0;
 
   const bind = (canvas) => {
     if (!canvas || canvas.dataset.lookBound === "1") return;
@@ -56,17 +60,22 @@ export function attachMouseLook(onDelta, onScan) {
       }
     });
 
-    // mousedown fires while pointer-locked; click alone is unreliable then.
     document.addEventListener("mousedown", (e) => {
       if (document.pointerLockElement !== canvas) return;
       if (e.button !== 0) return;
+      const now = performance.now();
+      // Ignore the click that acquired the lock + debounce double fires.
+      if (now - lockAt < 350) return;
+      if (now - lastScanAt < 120) return;
+      lastScanAt = now;
       e.preventDefault();
       onScan();
     });
 
     document.addEventListener("pointerlockchange", () => {
-      canvas.style.cursor =
-        document.pointerLockElement === canvas ? "none" : "crosshair";
+      const locked = document.pointerLockElement === canvas;
+      canvas.style.cursor = locked ? "none" : "crosshair";
+      if (locked) lockAt = performance.now();
     });
 
     document.addEventListener("mousemove", (e) => {

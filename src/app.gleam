@@ -442,7 +442,7 @@ fn view_ascii_panel(model: Model) -> Element(Msg) {
     ]),
     html.p([attr.class("ascii-hint")], [
       html.text(
-        "Maze: . floor, | _ walls, E exit (green). WASD move · click canvas to mouse-look · click/Space scan (memory keeps every hit) · Esc unlocks.",
+        "Scanner Sombre–style: pitch dark until you paint lidar dots. Rescan to densify. WASD · click canvas to look · click/Space spray · Esc unlocks. E = green exit.",
       ),
     ]),
     html.div([attr.class("ascii-actions")], [

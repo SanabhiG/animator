@@ -1,14 +1,11 @@
-Lidar Maze Explorer
+Lidar Maze Explorer (Scanner Sombre–style)
 
-This extension turns an ASCII maze into an explorable first-person lidar game.
-Mazes use '.' for open floor, '|' and '_' for walls, and 'E' for the exit. The
-string becomes an m×n grid; with Lidar maze mode on you walk with WASD/arrows
-and look by clicking the canvas for pointer-lock mouse-look (or the Look slider).
-
-The world stays mostly dark until you Scan (or press Space). Rays march with a
-fine continuous step; strip length uses fisheye-corrected perpendicular depth
-(distance × cos(ray−view)) so wall heights change smoothly without the usual
-bulge at the screen edges. A warm amber perspective floor sits under the
-horizon, separate from cyan wall returns. Exit cells ping bright green so they
-read as unique identifiers once scanned. Returns accumulate and fade so you
-map the maze like a lidar game. ColorLine/Circle still work in normal draw mode.
+Inspired by Scanner Sombre: the maze is pitch dark and you reveal it by spraying
+a permanent LIDAR point cloud. Mazes use '.' floor, '|' / '_' walls, and 'E' for
+a green exit. WASD moves; click the canvas for mouse-look; click/Space sprays
+dots. Each scan adds more speckles (with angular jitter so gaps fill in) —
+rescanning the same place makes the cloud denser and the geometry clearer,
+rather than replacing or stacking wall columns. Only near-exact duplicates are
+skipped. Specks are colored by depth (warm near, cool far); exits stay green.
+Memory persists in localStorage. Fisheye-corrected continuous depth drives the
+brief live pulse. Normal Gleam draw mode is unchanged.

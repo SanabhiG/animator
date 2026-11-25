@@ -24,7 +24,7 @@ pub const default_ascii = "___________________
 |_________________|
 "
 
-const screen_columns = 160
+const screen_columns = 220
 const max_ray_dist = 14.0
 const step_eps = 0.02
 const wall_scale = 68.0
@@ -33,6 +33,9 @@ const tau = 6.283185307179586
 const move_step = 0.18
 const turn_step = 0.12
 const mouse_sens = 0.0025
+/// Snap for exact-duplicate suppression only (Scanner Sombre keeps density).
+const cloud_quantize = 0.05
+const max_memory_points = 12_000
 
 @external(javascript, "./render_ffi.mjs", "cos")
 fn cos(x: Float) -> Float
@@ -58,7 +61,8 @@ pub type Player {
 }
 
 pub type ScanPoint {
-  ScanPoint(x: Float, y: Float, strength: Float, is_exit: Bool)
+  /// One lidar speck in world space (Scanner Sombre–style point cloud).
+  ScanPoint(x: Float, y: Float, depth: Float, is_exit: Bool)
 }
 
 type Maybe(a) {
@@ -253,13 +257,6 @@ fn wrap_angle(a: Float) -> Float {
   }
 }
 
-fn result_unwrap(r: Result(Float, Nil), fallback: Float) -> Float {
-  case r {
-    Ok(v) -> v
-    Error(_) -> fallback
-  }
-}
-
 /// Classic fisheye fix: use depth along the camera forward axis.
 fn perp_dist(euclid: Float, ray_angle: Float, view_angle: Float) -> Float {
   let rel = ray_angle -. view_angle
@@ -311,11 +308,11 @@ fn cast_loop(
   }
 }
 
-// ── Lidar scan ────────────────────────────────────────────────────────────────
+// ── Lidar scan (Scanner Sombre–style accumulating point cloud) ────────────────
 
-/// Merge new hits into permanent memory.
-/// A rescan **replaces** anything currently in the view cone (so lines don't
-/// stack), then upserts by wall cell so each solid cell keeps one return.
+/// Spray permanent dots onto whatever the rays hit. Rescans **add** coverage
+/// (with slight angular jitter so gaps fill in) — denser cloud = clearer map.
+/// Only near-exact duplicates are skipped so a double-click doesn't clone dots.
 pub fn scan(
   maze: Maze,
   player: Player,
@@ -324,66 +321,79 @@ pub fn scan(
   let fresh =
     range_map(0, screen_columns - 1, fn(i) {
       let u = int.to_float(i) /. int.to_float(screen_columns - 1)
-      let ang = player.angle -. fov /. 2.0 +. u *. fov
+      // Jitter fills interstitial gaps on later passes ("making the scan better").
+      let jitter = { float.random() -. 0.5 } *. { fov /. int.to_float(screen_columns) } *. 2.5
+      let ang = player.angle -. fov /. 2.0 +. u *. fov +. jitter
       case cast_ray(maze, player.x, player.y, ang) {
-        Nothing -> Nothing
-        Just(hit) -> Just(ScanPoint(hit.wx, hit.wy, 1.0, hit.is_exit))
+        Nothing -> []
+        Just(hit) -> {
+          let depth = perp_dist(hit.distance, ang, player.angle)
+          let wall = ScanPoint(hit.wx, hit.wy, depth, hit.is_exit)
+          // Also paint a few floor specks along the ray (open ground).
+          list.append(floor_specks(maze, player, ang, hit.distance), [wall])
+        }
       }
     })
-    |> list.filter_map(fn(m) {
-      case m {
-        Just(p) -> Ok(p)
-        Nothing -> Error(Nil)
+    |> list.flatten
+  merge_cloud(existing, fresh)
+}
+
+fn floor_specks(
+  maze: Maze,
+  player: Player,
+  ang: Float,
+  wall_dist: Float,
+) -> List(ScanPoint) {
+  let dx = cos(ang)
+  let dy = sin(ang)
+  range_map(1, 6, fn(k) {
+    let d = int.to_float(k) *. { wall_dist /. 7.0 }
+    case d >=. wall_dist -. 0.15 {
+      True -> Nothing
+      False -> {
+        let x = player.x +. dx *. d
+        let y = player.y +. dy *. d
+        case is_solid(maze, float.truncate(x), float.truncate(y)) {
+          True -> Nothing
+          False -> Just(ScanPoint(x, y, d, False))
+        }
       }
-    })
-  // Drop prior returns that this scan can see — override, don't stack.
-  let kept =
-    list.filter(existing, fn(p) { !in_view(player, p) })
-  merge_memory(kept, fresh)
-}
-
-fn cell_key(p: ScanPoint) -> String {
-  // One memory slot per maze cell (not per micro-step along the wall).
-  let gx = float.truncate(p.x)
-  let gy = float.truncate(p.y)
-  let exit = case p.is_exit {
-    True -> "1"
-    False -> "0"
-  }
-  int.to_string(gx) <> "," <> int.to_string(gy) <> "," <> exit
-}
-
-fn in_view(player: Player, p: ScanPoint) -> Bool {
-  let dx = p.x -. player.x
-  let dy = p.y -. player.y
-  let dist = case float.square_root(dx *. dx +. dy *. dy) {
-    Ok(d) -> d
-    Error(_) -> 99.0
-  }
-  case dist <. 0.05 || dist >. max_ray_dist {
-    True -> False
-    False -> {
-      let world_ang = atan2_ffi(dy, dx)
-      let rel =
-        wrap_angle(world_ang -. player.angle +. tau /. 2.0) -. tau /. 2.0
-      float.absolute_value(rel) <=. fov /. 2.0 +. 0.02
     }
-  }
+  })
+  |> list.filter_map(fn(m) {
+    case m {
+      Just(p) -> Ok(p)
+      Nothing -> Error(Nil)
+    }
+  })
 }
 
-fn merge_memory(
+fn cloud_key(p: ScanPoint) -> String {
+  let qx = float.truncate(p.x /. cloud_quantize)
+  let qy = float.truncate(p.y /. cloud_quantize)
+  int.to_string(qx) <> "," <> int.to_string(qy)
+}
+
+fn merge_cloud(
   existing: List(ScanPoint),
   fresh: List(ScanPoint),
 ) -> List(ScanPoint) {
   let start =
-    list.fold(existing, dict.new(), fn(acc, p) {
-      dict.insert(acc, cell_key(p), ScanPoint(..p, strength: 1.0))
+    list.fold(existing, dict.new(), fn(acc, p) { dict.insert(acc, cloud_key(p), p) })
+  let merged =
+    list.fold(fresh, start, fn(acc, p) {
+      case dict.get(acc, cloud_key(p)) {
+        // Already painted this speck — keep existing (don't stack clones).
+        Ok(_) -> acc
+        Error(_) -> dict.insert(acc, cloud_key(p), p)
+      }
     })
-  list.fold(fresh, start, fn(acc, p) {
-    // Fresh hit wins for that wall cell.
-    dict.insert(acc, cell_key(p), ScanPoint(..p, strength: 1.0))
-  })
-  |> dict.values
+    |> dict.values
+  case list.length(merged) > max_memory_points {
+    // Prefer newest coverage if we ever hit the safety cap.
+    True -> list.take(list.reverse(merged), max_memory_points)
+    False -> merged
+  }
 }
 
 /// Encode the full lidar memory for localStorage.
@@ -392,7 +402,7 @@ pub fn encode_memory(points: List(ScanPoint)) -> String {
     json.object([
       #("x", json.float(p.x)),
       #("y", json.float(p.y)),
-      #("s", json.float(p.strength)),
+      #("d", json.float(p.depth)),
       #("e", json.bool(p.is_exit)),
     ])
   })
@@ -405,10 +415,11 @@ pub fn decode_memory(raw: String) -> List(ScanPoint) {
   let point = {
     use x <- decode.field("x", decode.float)
     use y <- decode.field("y", decode.float)
-    use s <- decode.field("s", decode.float)
+    use d <- decode.field("d", decode.float)
     use e <- decode.field("e", decode.bool)
-    decode.success(ScanPoint(x, y, s, e))
+    decode.success(ScanPoint(x, y, d, e))
   }
+  // Backward-compat with older {s: strength} saves → treat as empty rebuild.
   case json.parse(raw, decode.list(point)) {
     Ok(points) -> points
     Error(_) -> []
@@ -516,19 +527,23 @@ fn project_points(player: Player, points: List(ScanPoint)) -> List(Path) {
   list.index_map(points, fn(p, i) {
     case project_one(player, p) {
       Nothing -> []
-      Just(#(sx, half, strength)) -> {
-        let bright = float.truncate(180.0 *. strength)
-        let t = int.to_float(i % 40) /. 10.0
-        let #(r, g, b) = case p.is_exit {
-          True -> #(30, int.min(255, bright + 70), 55)
-          False -> #(bright / 4, bright, bright)
-        }
+      Just(#(sx, sy)) -> {
+        let #(r, g, b) = speck_color(p)
+        // Tiny cross = one lidar speck (point cloud, not a wall column).
+        let s = 2.8
+        let t = int.to_float(i % 50) /. 12.0
         [
           Path(
-            ColorLine(Point(sx, 0.0 -. half), Point(sx, half), r, g, b),
+            ColorLine(Point(sx, sy -. s), Point(sx, sy +. s), r, g, b),
             t,
-            t +. 6.0,
-            float.max(1.0, 3.5 *. strength),
+            t +. 2.0,
+            1.6,
+          ),
+          Path(
+            ColorLine(Point(sx -. s, sy), Point(sx +. s, sy), r, g, b),
+            t,
+            t +. 2.0,
+            1.6,
           ),
         ]
       }
@@ -537,27 +552,44 @@ fn project_points(player: Player, points: List(ScanPoint)) -> List(Path) {
   |> list.flatten
 }
 
-fn project_one(
-  player: Player,
-  p: ScanPoint,
-) -> Maybe(#(Float, Float, Float)) {
+/// Depth → rainbow-ish lidar tint; exits always green.
+fn speck_color(p: ScanPoint) -> #(Int, Int, Int) {
+  case p.is_exit {
+    True -> #(40, 255, 90)
+    False -> {
+      let t = float.min(p.depth /. max_ray_dist, 1.0)
+      // near warm → far cool (Scanner Sombre depth cue)
+      let r = float.truncate(255.0 *. { 1.0 -. t })
+      let g = float.truncate(80.0 +. 140.0 *. { 1.0 -. float.absolute_value(t -. 0.45) })
+      let b = float.truncate(60.0 +. 195.0 *. t)
+      #(r, g, b)
+    }
+  }
+}
+
+fn project_one(player: Player, p: ScanPoint) -> Maybe(#(Float, Float)) {
   let dx = p.x -. player.x
   let dy = p.y -. player.y
-  let euclid = float.square_root(dx *. dx +. dy *. dy) |> result_unwrap(99.0)
+  let euclid = case float.square_root(dx *. dx +. dy *. dy) {
+    Ok(d) -> d
+    Error(_) -> 99.0
+  }
   case euclid <. 0.05 || euclid >. max_ray_dist {
     True -> Nothing
     False -> {
       let world_ang = atan2_ffi(dy, dx)
       let rel = wrap_angle(world_ang -. player.angle +. tau /. 2.0) -. tau /. 2.0
-      case float.absolute_value(rel) >. fov /. 2.0 +. 0.05 {
+      case float.absolute_value(rel) >. fov /. 2.0 +. 0.08 {
         True -> Nothing
         False -> {
           let u = rel /. fov +. 0.5
           let sx = -480.0 +. u *. 960.0
           let dist = perp_dist(euclid, world_ang, player.angle)
-          let half =
-            float.min(wall_scale /. float.max(dist, 0.12), 420.0) *. p.strength
-          Just(#(sx, half, p.strength))
+          // Place speck on a virtual wall strip / floor band by depth.
+          let half = float.min(wall_scale /. float.max(dist, 0.12), 400.0)
+          // Wall hits sit mid-strip; farther = slightly lower (floor bias).
+          let sy = 0.0 -. half *. 0.15 +. dist *. 6.0
+          Just(#(sx, float.min(sy, half -. 8.0)))
         }
       }
     }
