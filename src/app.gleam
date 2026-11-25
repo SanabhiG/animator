@@ -76,7 +76,10 @@ pub type Msg {
 fn attach_keys(on_key: fn(String) -> Nil) -> Nil
 
 @external(javascript, "./app_keys_ffi.mjs", "attachMouseLook")
-fn attach_mouse_look(on_delta: fn(Float) -> Nil) -> Nil
+fn attach_mouse_look(
+  on_delta: fn(Float) -> Nil,
+  on_scan: fn() -> Nil,
+) -> Nil
 
 // ── Init ───────────────────────────────────────────────────────────────────────
 
@@ -113,7 +116,10 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       effect.from(fn(_) { render.set_speed(1.0) }),
       effect.from(fn(dispatch) { attach_keys(fn(k) { dispatch(Key(k)) }) }),
       effect.from(fn(dispatch) {
-        attach_mouse_look(fn(dx) { dispatch(MouseLook(dx)) })
+        attach_mouse_look(
+          fn(dx) { dispatch(MouseLook(dx)) },
+          fn() { dispatch(Scan) },
+        )
       }),
     ]),
   )
@@ -424,7 +430,7 @@ fn view_ascii_panel(model: Model) -> Element(Msg) {
     ]),
     html.p([attr.class("ascii-hint")], [
       html.text(
-        "Maze: . floor, | _ walls, E exit (green). WASD move · click canvas for mouse-look · Space/Scan lidar. Fisheye-corrected continuous depth.",
+        "Maze: . floor, | _ walls, E exit (green). WASD move · click canvas to mouse-look · while locked, click or Space to scan · Esc unlocks.",
       ),
     ]),
     html.div([attr.class("ascii-actions")], [

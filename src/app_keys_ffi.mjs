@@ -35,8 +35,11 @@ export function attachKeys(onKey) {
   });
 }
 
-/** Click the canvas to pointer-lock; mouse X then yaws look. */
-export function attachMouseLook(onDelta) {
+/**
+ * Click canvas to pointer-lock (look with mouse).
+ * While locked: left-click = lidar scan (Space still works too).
+ */
+export function attachMouseLook(onDelta, onScan) {
   if (lookAttached) return;
   lookAttached = true;
 
@@ -44,12 +47,21 @@ export function attachMouseLook(onDelta) {
     if (!canvas || canvas.dataset.lookBound === "1") return;
     canvas.dataset.lookBound = "1";
     canvas.style.cursor = "crosshair";
-    canvas.title = "Click to mouse-look (Esc to release)";
+    canvas.title =
+      "Click to mouse-look · while locked, click = scan · Esc releases";
 
     canvas.addEventListener("click", () => {
       if (document.pointerLockElement !== canvas) {
         canvas.requestPointerLock?.();
       }
+    });
+
+    // mousedown fires while pointer-locked; click alone is unreliable then.
+    document.addEventListener("mousedown", (e) => {
+      if (document.pointerLockElement !== canvas) return;
+      if (e.button !== 0) return;
+      e.preventDefault();
+      onScan();
     });
 
     document.addEventListener("pointerlockchange", () => {
