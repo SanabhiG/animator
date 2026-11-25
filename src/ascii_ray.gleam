@@ -313,10 +313,9 @@ fn cast_loop(
 
 // ── Lidar scan ────────────────────────────────────────────────────────────────
 
-const quantize = 0.08
-
-/// Merge new hits into permanent memory. Points never fade; rescans only add
-/// coverage. Nearby hits snap to a fine grid so duplicates collapse.
+/// Merge new hits into permanent memory.
+/// A rescan **replaces** anything currently in the view cone (so lines don't
+/// stack), then upserts by wall cell so each solid cell keeps one return.
 pub fn scan(
   maze: Maze,
   player: Player,
@@ -328,9 +327,7 @@ pub fn scan(
       let ang = player.angle -. fov /. 2.0 +. u *. fov
       case cast_ray(maze, player.x, player.y, ang) {
         Nothing -> Nothing
-        Just(hit) ->
-          // Full-strength memory — distance only affects live pulse strips.
-          Just(ScanPoint(hit.wx, hit.wy, 1.0, hit.is_exit))
+        Just(hit) -> Just(ScanPoint(hit.wx, hit.wy, 1.0, hit.is_exit))
       }
     })
     |> list.filter_map(fn(m) {
@@ -339,17 +336,39 @@ pub fn scan(
         Nothing -> Error(Nil)
       }
     })
-  merge_memory(existing, fresh)
+  // Drop prior returns that this scan can see — override, don't stack.
+  let kept =
+    list.filter(existing, fn(p) { !in_view(player, p) })
+  merge_memory(kept, fresh)
 }
 
-fn point_key(p: ScanPoint) -> String {
-  let qx = float.truncate(p.x /. quantize)
-  let qy = float.truncate(p.y /. quantize)
+fn cell_key(p: ScanPoint) -> String {
+  // One memory slot per maze cell (not per micro-step along the wall).
+  let gx = float.truncate(p.x)
+  let gy = float.truncate(p.y)
   let exit = case p.is_exit {
     True -> "1"
     False -> "0"
   }
-  int.to_string(qx) <> "," <> int.to_string(qy) <> "," <> exit
+  int.to_string(gx) <> "," <> int.to_string(gy) <> "," <> exit
+}
+
+fn in_view(player: Player, p: ScanPoint) -> Bool {
+  let dx = p.x -. player.x
+  let dy = p.y -. player.y
+  let dist = case float.square_root(dx *. dx +. dy *. dy) {
+    Ok(d) -> d
+    Error(_) -> 99.0
+  }
+  case dist <. 0.05 || dist >. max_ray_dist {
+    True -> False
+    False -> {
+      let world_ang = atan2_ffi(dy, dx)
+      let rel =
+        wrap_angle(world_ang -. player.angle +. tau /. 2.0) -. tau /. 2.0
+      float.absolute_value(rel) <=. fov /. 2.0 +. 0.02
+    }
+  }
 }
 
 fn merge_memory(
@@ -358,25 +377,11 @@ fn merge_memory(
 ) -> List(ScanPoint) {
   let start =
     list.fold(existing, dict.new(), fn(acc, p) {
-      dict.insert(acc, point_key(p), p)
+      dict.insert(acc, cell_key(p), ScanPoint(..p, strength: 1.0))
     })
   list.fold(fresh, start, fn(acc, p) {
-    let key = point_key(p)
-    case dict.get(acc, key) {
-      Ok(old) ->
-        dict.insert(
-          acc,
-          key,
-          ScanPoint(
-            // Keep a stable sample; mark exit if either saw it.
-            old.x,
-            old.y,
-            1.0,
-            old.is_exit || p.is_exit,
-          ),
-        )
-      Error(_) -> dict.insert(acc, key, ScanPoint(..p, strength: 1.0))
-    }
+    // Fresh hit wins for that wall cell.
+    dict.insert(acc, cell_key(p), ScanPoint(..p, strength: 1.0))
   })
   |> dict.values
 }
